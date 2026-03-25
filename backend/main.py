@@ -232,8 +232,9 @@ async def fetch_apollo_leads(filters: dict) -> dict:
             ]
             
             import csv
-            with open("data.csv", "a", newline="", encoding="utf-8") as f:
+            with open("data.csv", "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
+                writer.writerow(["Name", "Title", "Company", "Email", "Phone", "About Company"])
                 for lead in filtered_leads:
                     writer.writerow([
                         lead['name'],
