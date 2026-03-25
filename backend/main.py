@@ -441,3 +441,15 @@ async def enrich_lead(req: EnrichRequest):
             raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+
+
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+import os
+
+os.makedirs("static", exist_ok=True)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/")
+def serve_frontend():
+    return FileResponse("static/index.html")
