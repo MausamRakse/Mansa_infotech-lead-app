@@ -41,6 +41,7 @@ const App = () => {
     // Results
     const [leads, setLeads] = useState([]);
     const [count, setCount] = useState(null);
+    const [message, setMessage] = useState('');
 
     const handleLocationChange = async (e) => {
         const selectedCountryName = e.target.value;
@@ -58,7 +59,7 @@ const App = () => {
         setLoadingStates(true);
         setStateError(null);
         try {
-            const res = await axios.get(`/api/countries/${selectedCountry.iso2}/states`);
+            const res = await axios.get(`http://127.0.0.1:8000/api/countries/${selectedCountry.iso2}/states`);
             setStates(res.data.states || []);
         } catch (error) {
             setStateError("Unable to load states. Please try again.");
@@ -82,7 +83,7 @@ const App = () => {
         setLoadingCities(true);
         setCityError(null);
         try {
-            const res = await axios.get(`/api/countries/${selectedCountry.iso2}/states/${selectedStateElement.iso2}/cities`);
+            const res = await axios.get(`http://127.0.0.1:8000/api/countries/${selectedCountry.iso2}/states/${selectedStateElement.iso2}/cities`);
             setCities(res.data.cities || []);
         } catch (error) {
             setCityError("Unable to load cities. Please try again.");
@@ -96,7 +97,7 @@ const App = () => {
         setLoadingCountries(true);
         setCountryError(null);
         try {
-            const res = await axios.get('/api/countries');
+            const res = await axios.get('http://127.0.0.1:8000/api/countries');
             setCountries(res.data.countries || []);
         } catch (error) {
             setCountryError("Unable to load countries. Please try again.");
@@ -121,9 +122,10 @@ const App = () => {
         setFiltersUsed(null);
         setLeads([]);
         setCount(null);
+        setMessage('');
 
         try {
-            const res = await axios.post('/api/leads', {
+            const res = await axios.post('http://127.0.0.1:8000/api/leads', {
                 industry,
                 location,
                 state: stateName,
@@ -136,6 +138,7 @@ const App = () => {
             });
             setLeads(res.data.leads || []);
             setCount(res.data.count || 0);
+            setMessage(res.data.message || '');
         } catch (error) {
             if (!error.response) {
                 showAlert("Could not connect to backend.", "red");
@@ -153,12 +156,14 @@ const App = () => {
         setFiltersUsed(null);
         setLeads([]);
         setCount(null);
+        setMessage('');
 
         try {
-            const res = await axios.post('/api/ai-search', { prompt });
+            const res = await axios.post('http://127.0.0.1:8000/api/ai-search', { prompt });
             setLeads(res.data.leads || []);
             setCount(res.data.count || 0);
             setFiltersUsed(res.data.filters_used);
+            setMessage(res.data.message || '');
         } catch (error) {
             if (!error.response) {
                 showAlert("Could not connect to backend.", "red");
@@ -188,7 +193,7 @@ const App = () => {
         });
 
         try {
-            const res = await axios.post('/api/enrich-lead', { person_id: personId });
+            const res = await axios.post('http://127.0.0.1:8000/api/enrich-lead', { person_id: personId });
             const unlockedData = res.data;
 
             setLeads(currentLeads => {
@@ -215,6 +220,30 @@ const App = () => {
                 return updated;
             });
             showAlert(error.response?.data?.detail || "Failed to unlock contact", "red");
+        }
+    };
+
+    const handleDownloadCSV = async () => {
+        try {
+            const response = await axios({
+                url: 'http://127.0.0.1:8000/api/download-csv',
+                method: 'GET',
+                responseType: 'blob', // Important for handling binary data
+            });
+
+            // Create a link to download the file
+            const url = window.URL.createObjectURL(new Blob([response.data]));
+            const link = document.createElement('a');
+            link.href = url;
+            link.setAttribute('download', 'leads_export.csv');
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            
+            // Show confirmation popup
+            showAlert("Your download is complete", "green");
+        } catch (error) {
+            showAlert("Failed to download CSV", "red");
         }
     };
 
@@ -258,7 +287,7 @@ const App = () => {
 
             {mode === 'filter' ? (
                 <div className="panel animate-fade-in">
-                    <h2 style={{ marginTop: 0, marginBottom: '1.5rem', fontSize: '1.25rem' }}>🎯 Apollo Filters</h2>
+                    <h2 style={{ marginTop: 0, marginBottom: '1.5rem', fontSize: '1.25rem' }}>Filter</h2>
                     <div className="grid-2">
                         <div className="form-group">
                             <label>Industry</label>
@@ -365,7 +394,7 @@ const App = () => {
                                 Export JSON
                             </button>
                         )}
-                        <button className="btn-export" onClick={() => window.open('/api/download-csv', '_blank')} style={{ background: '#f0fdf4', borderColor: '#16a34a', color: '#166534', fontWeight: 'bold' }}>
+                        <button className="btn-export" onClick={handleDownloadCSV} style={{ background: '#f0fdf4', borderColor: '#16a34a', color: '#166534', fontWeight: 'bold' }}>
                             📥 Download DB (CSV)
                         </button>
                     </div>
@@ -377,9 +406,20 @@ const App = () => {
                     </div>
                 )}
 
+                {!loading && message && count > 0 && (
+                    <div style={{
+                        padding: '1rem', marginBottom: '1.5rem', borderRadius: '0.5rem', border: '1px solid', fontSize: '0.9rem', fontWeight: '500', textAlign: 'center',
+                        background: message.includes('only') ? '#fffbeb' : '#f0fdf4',
+                        color: message.includes('only') ? '#92400e' : '#166534',
+                        borderColor: message.includes('only') ? '#fcd34d' : '#86efac'
+                    }}>
+                        {message}
+                    </div>
+                )}
+
                 {!loading && count === 0 && (
                     <div className="spinner">
-                        No leads found. Try relaxing your filters.
+                        {message || "No leads found. Try relaxing your filters."}
                     </div>
                 )}
 

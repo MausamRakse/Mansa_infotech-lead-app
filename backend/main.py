@@ -5,6 +5,13 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+from database import engine, SessionLocal, get_db
+import models
+from download_utils import generate_csv_from_db
+from fastapi import Depends
+from sqlalchemy.orm import Session
+
+models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
@@ -139,6 +146,51 @@ async def enrich_person(client: httpx.AsyncClient, api_key: str, person_id: str)
     return {}
 
 
+def save_leads_to_db(leads_data, filters):
+    db = SessionLocal()
+    try:
+        # Get requested filter strings to store alongside fetched leads
+        industry     = filters.get("industry", "")
+        country      = filters.get("location", "")
+        state        = filters.get("state", "")
+        city         = filters.get("city", "")
+        
+        # company size text logic
+        company_size = filters.get("company_size", "")
+        if not company_size and filters.get("company_size_min"):
+            company_size = f"{filters.get('company_size_min')}-{filters.get('company_size_max')}"
+            
+        for l in leads_data:
+            email = l.get("email", "")
+            # Skip duplicates based on email
+            if email and email not in ("Not available", ""):
+                existing = db.query(models.Lead).filter(models.Lead.email == email).first()
+                if existing:
+                    continue
+
+            new_lead = models.Lead(
+                name            = l.get("name", ""),
+                title           = l.get("title", ""),
+                company_name    = l.get("company", ""),
+                about_company   = l.get("about_company", ""),
+                email           = email,
+                phone           = l.get("phone", ""),
+                linkedin_url    = l.get("linkedin_url", ""),
+                industry        = industry,
+                country         = country,
+                state           = state,
+                city            = city,
+                company_size    = company_size,
+            )
+            db.add(new_lead)
+
+        db.commit()
+    except Exception as e:
+        print("DB ERROR:", e)
+        db.rollback()
+    finally:
+        db.close()
+
 # ── Core Apollo search + enrich ───────────────────────────────────────────────
 
 async def fetch_apollo_leads(filters: dict) -> dict:
@@ -223,6 +275,7 @@ async def fetch_apollo_leads(filters: dict) -> dict:
                     "company":       org.get("name", "Unknown Company"),
                     "email":         extract_email(merged),
                     "phone":         extract_phone(merged),
+                    "linkedin_url":  merged.get("linkedin_url", ""),
                     "about_company": about,
                 })
             filtered_leads = [
@@ -231,23 +284,31 @@ async def fetch_apollo_leads(filters: dict) -> dict:
                 and lead.get("phone") not in ["", None, "Not available"]
             ]
             
-            import csv
-            with open("data.csv", "w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow(["Name", "Title", "Company", "Email", "Phone", "About Company"])
-                for lead in filtered_leads:
-                    writer.writerow([
-                        lead['name'],
-                        lead['title'],
-                        lead['company'],
-                        lead['email'],
-                        lead['phone'],
-                        lead['about_company']
-                    ])
+
+            try:
+                save_leads_to_db(filtered_leads, filters)
+            except Exception as e:
+                print("Failed to save to db:", e)
+
+            valid_count = len(filtered_leads)
+            raw_processed_count = len(people)
+            removed_count = raw_processed_count - valid_count
+            
+            if raw_processed_count == 0:
+                message = "No data provided by backend"
+            elif valid_count == 0:
+                message = "No valid leads found"
+            elif valid_count < requested_limit:
+                message = f"We found only {valid_count} valid leads"
+            else:
+                message = f"Successfully found {requested_limit} leads"
 
             return {
                 "leads": filtered_leads,
-                "count": len(filtered_leads) 
+                "count": valid_count,
+                "raw_processed": raw_processed_count,
+                "removed_count": removed_count,
+                "message": message
             }
 
 
@@ -265,12 +326,8 @@ async def get_leads(req: LeadRequest):
 
 
 @app.get("/api/download-csv")
-async def download_csv():
-    file_path = "data.csv"
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="CSV file not found")
-    from fastapi.responses import FileResponse
-    return FileResponse(file_path, media_type="text/csv", filename="leads_db.csv")
+async def download_csv(db: Session = Depends(get_db)):
+    return generate_csv_from_db(db)
 
 
 _cached_countries = []
@@ -442,6 +499,116 @@ async def enrich_lead(req: EnrichRequest):
             raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+
+
+from fastapi import Depends
+from sqlalchemy.orm import Session
+from database import get_db
+
+@app.get("/api/db-leads")
+def get_db_leads(
+    skip: int = 0, 
+    limit: int = 100, 
+    industry: Optional[str] = None,
+    country: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(models.Lead)
+    if industry:
+        query = query.filter(models.Lead.industry.ilike(f"%{industry}%"))
+    if country:
+        query = query.filter(models.Lead.country.ilike(f"%{country}%"))
+        
+    leads = query.offset(skip).limit(limit).all()
+    results = [
+        {
+            "id": l.id,
+            "name": l.name,
+            "title": l.title,
+            "company_name": l.company_name,
+            "about_company": l.about_company,
+            "email": l.email,
+            "phone": l.phone,
+            "linkedin_url": l.linkedin_url,
+            "industry": l.industry,
+            "country": l.country,
+            "state": l.state,
+            "city": l.city,
+            "company_size": l.company_size,
+            "created_at": l.created_at.isoformat() if l.created_at else None,
+            "updated_at": l.updated_at.isoformat() if l.updated_at else None,
+        }
+        for l in leads
+    ]
+    return {"leads": results, "count": len(results)}
+
+@app.get("/api/db-leads/{lead_id}")
+def get_db_lead(lead_id: int, db: Session = Depends(get_db)):
+    lead = db.query(models.Lead).filter(models.Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    return {
+        "id": lead.id,
+        "name": lead.name,
+        "title": lead.title,
+        "company_name": lead.company_name,
+        "about_company": lead.about_company,
+        "email": lead.email,
+        "phone": lead.phone,
+        "linkedin_url": lead.linkedin_url,
+        "industry": lead.industry,
+        "country": lead.country,
+        "state": lead.state,
+        "city": lead.city,
+        "company_size": lead.company_size,
+        "created_at": lead.created_at.isoformat() if lead.created_at else None,
+        "updated_at": lead.updated_at.isoformat() if lead.updated_at else None,
+    }
+
+@app.post("/api/db-leads")
+def create_db_lead(lead_data: dict, db: Session = Depends(get_db)):
+    new_lead = models.Lead(
+        name=lead_data.get("name"),
+        title=lead_data.get("title"),
+        company_name=lead_data.get("company_name"),
+        about_company=lead_data.get("about_company"),
+        email=lead_data.get("email"),
+        phone=lead_data.get("phone"),
+        linkedin_url=lead_data.get("linkedin_url"),
+        industry=lead_data.get("industry"),
+        country=lead_data.get("country"),
+        state=lead_data.get("state"),
+        city=lead_data.get("city"),
+        company_size=lead_data.get("company_size"),
+    )
+    db.add(new_lead)
+    db.commit()
+    db.refresh(new_lead)
+    return {"id": new_lead.id, "name": new_lead.name}
+
+@app.put("/api/db-leads/{lead_id}")
+def update_db_lead(lead_id: int, lead_data: dict, db: Session = Depends(get_db)):
+    lead = db.query(models.Lead).filter(models.Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    
+    for key, value in lead_data.items():
+        if hasattr(lead, key):
+            setattr(lead, key, value)
+            
+    db.commit()
+    db.refresh(lead)
+    return {"id": lead.id, "status": "updated"}
+
+@app.delete("/api/db-leads/{lead_id}")
+def delete_db_lead(lead_id: int, db: Session = Depends(get_db)):
+    lead = db.query(models.Lead).filter(models.Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    
+    db.delete(lead)
+    db.commit()
+    return {"detail": "Lead deleted"}
 
 
 from fastapi.staticfiles import StaticFiles
